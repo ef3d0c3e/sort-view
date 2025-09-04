@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use tokio::task;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -57,7 +57,7 @@ pub struct Sort {
 }
 
 impl Sort {
-	fn render(&self, list: &Vec<u32>, highlights: Option<HashSet<usize>>) -> Vec<u8> {
+	fn render(&self, list: &Vec<u32>, highlights: HashMap<usize, f32>) -> Vec<u8> {
 		let max = list.iter().fold(u32::MIN, |r, v| r.max(*v));
 		let width = self.margin * 2
 			+ self.spacing * ((list.len() as u32) - 1)
@@ -106,11 +106,9 @@ impl Sort {
 						let bar_height_frac = 1.0 - (bar_y as f32) / (self.height as f32);
 
 						let color = if h_frac >= bar_height_frac {
-							let factor = highlights
-								.as_ref()
-								.filter(|hi| hi.contains(&i))
-								.map(|_| 0.5)
-								.unwrap_or(0.0);
+							let factor = *highlights
+								.get(&i)
+								.unwrap_or(&0.0);
 
 							self.colors
 								.sample(h_frac)
@@ -145,7 +143,7 @@ pub fn bubble_sort(sort: &Sort, mut list: Vec<u32>) {
 		let tmp = list[y];
 		list[y] = list[x];
 		list[x] = tmp;
-		let image = sort.render(list, None);
+		let image = sort.render(list, HashMap::default());
 		std::fs::write(format!("sort-{count}.png"), image).unwrap();
 		*count += 1;
 	}
@@ -169,6 +167,7 @@ pub struct SortData {
 
 	write_sem: Arc<Semaphore>,
 	handles: Vec<task::JoinHandle<()>>,
+	highlights: HashMap<usize, f32>,
 }
 
 impl SortData {
@@ -180,6 +179,7 @@ impl SortData {
 			sort: Arc::new(sort),
 			write_sem: Arc::new(Semaphore::new(8)),
 			handles: Vec::new(),
+			highlights: HashMap::new(),
 		}
 	}
 
@@ -197,15 +197,17 @@ impl SortData {
 		self.list[x] = tmp;
 
 		let sem = self.write_sem.clone();
-		let count = self.count;
 		let list = self.list.clone();
 		let sort = self.sort.clone();
 		let name = self.name.clone();
+		let count = self.count;
+		let mut hi = self.highlights.clone();
 		let handle = tokio::task::spawn(async move {
 			let _permit = sem.acquire().await.unwrap();
 
-			println!("spawned: {count}");
-			let image = sort.render(&list, None);
+			hi.insert(x, 0.2);
+			hi.insert(y, 0.2);
+			let image = sort.render(&list, hi);
 			std::fs::write(format!("{}-{}.png", name, count), image).unwrap();
 		});
 		self.handles.push(handle);
@@ -215,10 +217,30 @@ impl SortData {
 	pub fn compare(&mut self, x: usize, y: usize) -> Ordering {
 		let hi: HashSet<usize> = [x, y].into_iter().collect();
 
-		let image = self.sort.render(&self.list, Some(hi));
-		std::fs::write(format!("{}-{}.png", self.name, self.count), image).unwrap();
+		let sem = self.write_sem.clone();
+		let list = self.list.clone();
+		let sort = self.sort.clone();
+		let name = self.name.clone();
+		let count = self.count.clone();
+		let hi = self.highlights.clone();
+		let handle = tokio::task::spawn(async move {
+			let _permit = sem.acquire().await.unwrap();
+
+			let image = sort.render(&list, hi);
+			std::fs::write(format!("{}-{}.png", name, count), image).unwrap();
+		});
+		self.handles.push(handle);
 		self.count += 1;
 		self.list[x].cmp(&self.list[y])
+	}
+
+	pub fn set_highlight(&mut self, idx: usize, value: f32) {
+		if value == 0.0
+		{
+			self.highlights.remove(&idx);
+			return;
+		}
+		self.highlights.insert(idx, value);
 	}
 }
 
@@ -226,27 +248,30 @@ pub fn qsort(data: &mut SortData) {
 	fn partition(data: &mut SortData, lo: usize, hi: usize) -> usize {
 		let pivot = data.list[hi];
 		let mut i = lo;
+		data.set_highlight(hi, 0.5);
 
 		for j in lo..hi {
-			//data.compare(j, hi);
+			data.set_highlight(j, 0.3);
 			if data.list[j] <= pivot {
 				data.swap(i, j);
 				i += 1;
 			}
+			data.set_highlight(j, 0.0);
 		}
 
+		data.set_highlight(hi, 0.0);
 		data.swap(i, hi);
 		i
 	}
 
 	fn qsort_recurse(data: &mut SortData, lo: usize, hi: usize) {
-		if hi - lo <= 1 {
+		if lo >= hi {
 			return;
 		}
 
 		let pivot = partition(data, lo, hi);
-		qsort_recurse(data, lo, pivot - 1);
-		qsort_recurse(data, pivot, hi);
+		qsort_recurse(data, lo, pivot.saturating_sub(1));
+		qsort_recurse(data, pivot + 1, hi);
 	}
 
 	let hi = data.list.len() - 1;
