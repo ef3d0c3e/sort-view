@@ -3,4 +3,4 @@
 This program's purpose is to help you visualize the sorting steps for sorting algorithms.
 
 ![demo](./demo.gif)
-![quicksort](./qsort.gif)
+![quicksort](./quicksort.gif)
